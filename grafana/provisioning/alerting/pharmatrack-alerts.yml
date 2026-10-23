@@ -1,0 +1,156 @@
+# Grafana alerting, provisioned on start-up.
+#   - Email contact point (needs SMTP settings in .env to actually send)
+#   - Notification policy routing every PharmaTrack alert to it
+#   - Four rules: low stock, out of stock, batches expiring within 7 days, API down
+# Telegram/Slack/WhatsApp contact points can be added later in Grafana:
+#   Alerting -> Contact points -> Add contact point.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: PharmaTrack email
+    receivers:
+      - uid: pharmatrack-email
+        type: email
+        settings:
+          addresses: ${ALERT_EMAIL}
+          singleEmail: true
+        disableResolveMessage: false
+
+policies:
+  - orgId: 1
+    receiver: PharmaTrack email
+    group_by: ["grafana_folder", "alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 12h
+
+groups:
+  - orgId: 1
+    name: Stock and expiry
+    folder: PharmaTrack
+    interval: 5m
+    rules:
+      - uid: pt-low-stock
+        title: Medicines below reorder level
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: pharmatrack-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: SELECT COUNT(*)::float AS value FROM v_medicine_stock WHERE is_active AND is_low_stock
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning, team: pharmacy }
+        annotations:
+          summary: "{{ $$values.A.Value }} medicine(s) are below their reorder level."
+          description: Open PharmaTrack -> Alerts and raise a purchase order for the items listed under Running low.
+        isPaused: false
+
+      - uid: pt-out-of-stock
+        title: Medicines out of stock
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: pharmatrack-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: SELECT COUNT(*)::float AS value FROM v_medicine_stock WHERE is_active AND stock = 0
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: critical, team: pharmacy }
+        annotations:
+          summary: "{{ $$values.A.Value }} active medicine(s) have no sellable stock."
+        isPaused: false
+
+      - uid: pt-expiring-7d
+        title: Batches expiring within 7 days
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: pharmatrack-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT COUNT(*)::float AS value FROM v_batch_expiry
+                WHERE quantity_available > 0 AND days_to_expiry BETWEEN 0 AND 7
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: critical, team: pharmacy }
+        annotations:
+          summary: "{{ $$values.A.Value }} batch(es) with stock left expire within 7 days."
+          description: Sell these first, offer a discount or return them to the supplier before they become a loss.
+        isPaused: false
+
+  - orgId: 1
+    name: Platform
+    folder: PharmaTrack
+    interval: 1m
+    rules:
+      - uid: pt-api-down
+        title: PharmaTrack API is down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: min(up{job="django"})
+              instant: true
+              range: false
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        labels: { severity: critical, team: platform }
+        annotations:
+          summary: Prometheus cannot reach the Django backend. Billing is unavailable.
+        isPaused: false
