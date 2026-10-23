@@ -1,6 +1,16 @@
 .env
+<<<<<<< HEAD
 node_modules/
 __pycache__/
 venv/
 *.db
 .DS_Store
+=======
+__pycache__/
+*.pyc
+node_modules/
+dist/
+staticfiles/
+.DS_Store
+.cloudflared/
+>>>>>>> 1a3f5fd34f4de28bd4b9d5d76eae4a57e98d9cb1
