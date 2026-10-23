@@ -1,0 +1,175 @@
+# PharmaTrack: the whole stack in one command.
+#
+#   cp .env.example .env        # then edit passwords
+#   docker compose up -d --build
+#   open http://localhost:8080          (app)
+#        http://localhost:8080/grafana  (dashboards)
+#
+# Optional extras (compose profiles):
+#   docker compose --profile demo up -d     # live sales simulator so Grafana graphs move
+#   docker compose --profile tunnel up -d   # publish on your domain via Cloudflare Tunnel
+
+name: pharmatrack
+
+x-db-env: &db-env
+  POSTGRES_DB: ${POSTGRES_DB:-pharmatrack}
+  POSTGRES_USER: ${POSTGRES_USER:-pharmatrack}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+
+x-backend-env: &backend-env
+  <<: *db-env
+  POSTGRES_HOST: db
+  POSTGRES_PORT: "5432"
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
+  DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+  DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
+  DJANGO_CSRF_TRUSTED_ORIGINS: ${PUBLIC_URL:-http://localhost:8080}
+  TZ: Asia/Kolkata
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?Set GRAFANA_DB_PASSWORD in .env}
+      TZ: Asia/Kolkata
+      PGTZ: Asia/Kolkata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Local only: lets you open the database in pgAdmin/DBeaver for the DBMS demo.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+      grafana:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: ${PUBLIC_URL:-http://localhost:8080}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_VIEWER:-false}
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/pharmatrack-inventory.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com:587}
+      GF_SMTP_USER: ${SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM:-pharmatrack@example.com}
+      GF_SMTP_FROM_NAME: PharmaTrack Alerts
+      # Read by the provisioning files (datasources.yml, pharmatrack-alerts.yml)
+      POSTGRES_DB: ${POSTGRES_DB:-pharmatrack}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      ALERT_EMAIL: ${ALERT_EMAIL:-admin@example.com}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_URI: db:5432/${POSTGRES_DB:-pharmatrack}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_USER:-pharmatrack}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    restart: unless-stopped
+    privileged: true
+    command: ["--docker_only=true", "--housekeeping_interval=15s"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      # Explicit socket mount: on Docker Desktop (Mac/Windows) /var/run above is the
+      # host OS's, so only this mount reaches the Docker engine inside the VM.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  # ---------------------------------------------------------------- optional
+  simulator:
+    profiles: ["demo"]
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      SEED_DEMO_DATA: "false"
+    command: ["python", "manage.py", "simulate_sales", "--interval", "${SIMULATOR_INTERVAL:-8}", "--metrics-port", "8001"]
+    healthcheck:   # the image's default check targets gunicorn on :8000, which this container doesn't run
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/metrics')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}   # from .env; see docs/CLOUDFLARE.md
+      # Origin for tunnels created with the cloudflared CLI; dashboard-managed tunnels use their public hostname setting.
+      TUNNEL_URL: http://frontend:80
+    depends_on:
+      - frontend
+
+volumes:
+  pgdata:
+  grafana-data:
+  prometheus-data:
