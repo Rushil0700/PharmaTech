@@ -247,3 +247,16 @@ After changing a dashboard in `grafana/build_dashboards.py`, run `python grafana
 | `DisallowedHost` / 400 on your domain | Add the domain to `DJANGO_ALLOWED_HOSTS` and restart the backend |
 | Grafana redirects to localhost on your domain | Set `PUBLIC_URL` to your https address and run `docker compose up -d grafana` |
 | No alert emails | Set `SMTP_ENABLED=true` plus SMTP settings. Gmail needs an App Password |
+
+---
+
+## 10. Team
+
+PharmaTrack was built by four of us, each owning one part of the stack:
+
+| Name | GitHub | Part |
+|---|---|---|
+| Rushil | [@Rushil0700](https://github.com/Rushil0700) | Docker Compose stack, environment template and documentation |
+| Krish Viramgama | [@figureitoutkrish](https://github.com/figureitoutkrish) | Django backend and database init scripts |
+| Vivaan Jasapara | [@vivaanjasapara707](https://github.com/vivaanjasapara707) | React frontend: billing, inventory, alerts and the Grafana overview |
+| Arnav Chaturvedi | [@Arnav-3012](https://github.com/Arnav-3012) | Monitoring: Prometheus and Grafana |
